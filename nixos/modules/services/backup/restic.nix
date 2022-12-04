@@ -298,10 +298,7 @@ in
             resticCmd = "${backup.package}/bin/restic${extraOptions}";
             excludeFlags = if (backup.exclude != []) then ["--exclude-file=${pkgs.writeText "exclude-patterns" (concatStringsSep "\n" backup.exclude)}"] else [];
             filesFromTmpFile = "/run/restic-backups-${name}/includes";
-            backupPaths =
-              if (backup.dynamicFilesFrom == null)
-              then if (backup.paths != null) then concatStringsSep " " backup.paths else ""
-              else "--files-from ${filesFromTmpFile}";
+            doBackup = (backup.dynamicFilesFrom != null) || (backup.paths != null && backup.paths != []);
             pruneCmd = optionals (builtins.length backup.pruneOpts > 0) [
               (resticCmd + " forget --prune --cache-dir=%C/restic-backups-${name} " + (concatStringsSep " " backup.pruneOpts))
               (resticCmd + " check --cache-dir=%C/restic-backups-${name} " + (concatStringsSep " " backup.checkOpts))
@@ -332,7 +329,7 @@ in
             restartIfChanged = false;
             serviceConfig = {
               Type = "oneshot";
-              ExecStart = (optionals (backupPaths != "") [ "${resticCmd} backup --cache-dir=%C/restic-backups-${name} ${concatStringsSep " " (backup.extraBackupArgs ++ excludeFlags)} ${backupPaths}" ])
+              ExecStart = (optionals doBackup [ "${resticCmd} backup --cache-dir=%C/restic-backups-${name} ${concatStringsSep " " (backup.extraBackupArgs ++ excludeFlags)} --files-from=${filesFromTmpFile}" ])
                 ++ pruneCmd;
               User = backup.user;
               RuntimeDirectory = "restic-backups-${name}";
@@ -350,7 +347,10 @@ in
                 ${resticCmd} snapshots || ${resticCmd} init
               ''}
               ${optionalString (backup.dynamicFilesFrom != null) ''
-                ${pkgs.writeScript "dynamicFilesFromScript" backup.dynamicFilesFrom} > ${filesFromTmpFile}
+                ${pkgs.writeScript "dynamicFilesFromScript" backup.dynamicFilesFrom} >> ${filesFromTmpFile}
+              ''}
+              ${optionalString (backup.paths != null && backup.paths != []) ''
+                cat ${pkgs.writeText "staticPaths" (concatStringsSep "\n" backup.paths)} >> ${filesFromTmpFile}
               ''}
             '';
           } // optionalAttrs (backup.dynamicFilesFrom != null || backup.backupCleanupCommand != null) {
