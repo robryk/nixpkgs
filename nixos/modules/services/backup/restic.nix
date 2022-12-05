@@ -5,6 +5,51 @@ with lib;
 let
   # Type for a valid systemd unit option. Needed for correctly passing "timerConfig" to "systemd.timers"
   inherit (utils.systemdUtils.unitOptions) unitOption;
+
+  wrappedRestic = backup : let
+    # Helper functions for rclone remotes
+    rcloneRemoteName = builtins.elemAt (splitString ":" backup.repository) 1;
+    rcloneAttrToOpt = v: "RCLONE_" + toUpper (builtins.replaceStrings [ "-" ] [ "_" ] v);
+    rcloneAttrToConf = v: "RCLONE_CONFIG_" + toUpper (rcloneRemoteName + "_" + v);
+    toRcloneVal = v: if lib.isBool v then lib.boolToString v else v;
+
+    env = {
+      RESTIC_PASSWORD_FILE = backup.passwordFile;
+      RESTIC_REPOSITORY = backup.repository;
+      RESTIC_REPOSITORY_FILE = backup.repositoryFile;
+    } // optionalAttrs (backup.rcloneOptions != null) (mapAttrs'
+      (name: value:
+        nameValuePair (rcloneAttrToOpt name) (toRcloneVal value)
+      )
+      backup.rcloneOptions
+    ) // optionalAttrs (backup.rcloneConfigFile != null) {
+      RCLONE_CONFIG = backup.rcloneConfigFile;
+    } // optionalAttrs (backup.rcloneConfig != null) (mapAttrs'
+      (name: value:
+        nameValuePair (rcloneAttrToConf name) (toRcloneVal value)
+      )
+      backup.rcloneConfig
+    );
+
+    envToWrapArgument = name: value:
+      if value == null then
+        "--unset ${name}"
+      else
+        "--set ${name} ${escapeShellArg value}";
+
+    envWrapArguments = concatStringsSep " " (mapAttrsToList envToWrapArgument env);
+
+    extraOptions = concatMapStrings (arg: " -o ${arg}") backup.extraOptions;
+  in
+    pkgs.runCommand "restic-for-repo" {
+      nativeBuildInputs = [ pkgs.makeWrapper ];
+    } ''
+      set -e
+      cp -r ${backup.package} $out
+      chmod -R u+w $out
+      wrapProgram $out/bin/restic ${envWrapArguments} --add-flags ${escapeShellArg extraOptions}
+    '';
+
 in
 {
   options.services.restic.backups = mkOption {
@@ -294,8 +339,7 @@ in
       mapAttrs'
         (name: backup:
           let
-            extraOptions = concatMapStrings (arg: " -o ${arg}") backup.extraOptions;
-            resticCmd = "${backup.package}/bin/restic${extraOptions}";
+            resticCmd = "${wrappedRestic backup}/bin/restic";
             excludeFlags = if (backup.exclude != []) then ["--exclude-file=${pkgs.writeText "exclude-patterns" (concatStringsSep "\n" backup.exclude)}"] else [];
             filesFromTmpFile = "/run/restic-backups-${name}/includes";
             doBackup = (backup.dynamicFilesFrom != null) || (backup.paths != null && backup.paths != []);
@@ -303,28 +347,8 @@ in
               (resticCmd + " forget --prune --cache-dir=%C/restic-backups-${name} " + (concatStringsSep " " backup.pruneOpts))
               (resticCmd + " check --cache-dir=%C/restic-backups-${name} " + (concatStringsSep " " backup.checkOpts))
             ];
-            # Helper functions for rclone remotes
-            rcloneRemoteName = builtins.elemAt (splitString ":" backup.repository) 1;
-            rcloneAttrToOpt = v: "RCLONE_" + toUpper (builtins.replaceStrings [ "-" ] [ "_" ] v);
-            rcloneAttrToConf = v: "RCLONE_CONFIG_" + toUpper (rcloneRemoteName + "_" + v);
-            toRcloneVal = v: if lib.isBool v then lib.boolToString v else v;
           in
           nameValuePair "restic-backups-${name}" ({
-            environment = {
-              RESTIC_PASSWORD_FILE = backup.passwordFile;
-              RESTIC_REPOSITORY = backup.repository;
-              RESTIC_REPOSITORY_FILE = backup.repositoryFile;
-            } // optionalAttrs (backup.rcloneOptions != null) (mapAttrs'
-              (name: value:
-                nameValuePair (rcloneAttrToOpt name) (toRcloneVal value)
-              )
-              backup.rcloneOptions) // optionalAttrs (backup.rcloneConfigFile != null) {
-              RCLONE_CONFIG = backup.rcloneConfigFile;
-            } // optionalAttrs (backup.rcloneConfig != null) (mapAttrs'
-              (name: value:
-                nameValuePair (rcloneAttrToConf name) (toRcloneVal value)
-              )
-              backup.rcloneConfig);
             path = [ pkgs.openssh ];
             restartIfChanged = false;
             serviceConfig = {
